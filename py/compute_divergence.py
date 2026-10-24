@@ -13,11 +13,10 @@ import sys
 if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-import logging
 import pandas as pd
 from sqlalchemy import text
 
-from config import LOG_FILE, get_engine
+from config import get_engine, get_logger
 
 # ---------------------------------------------------------
 # Config
@@ -26,26 +25,7 @@ DIVERGENCE_TABLE = "currency_divergence"
 QUOTE_CURRENCIES = ["USD", "GBP", "JPY", "CHF", "CNY"]
 BASE_CURRENCY = "EUR"
 
-# ---------------------------------------------------------
-# Logger
-# ---------------------------------------------------------
-def setup_logger():
-    logger = logging.getLogger("divergence")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        )
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
-
-
-logger = setup_logger()
+logger = get_logger("divergence")
 
 
 # ---------------------------------------------------------

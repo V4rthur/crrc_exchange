@@ -2,20 +2,21 @@
 Extract step: fetch EUR-based rates from Frankfurter (ECB) API
 and load them into market_currency_rates.
 
-Handles both latest-day fetch and historical backfill in one script.
+Handles the daily fetch (with catch-up of missed days) and historical
+backfill in one script.
 """
 
 import sys
 if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-import logging
 from datetime import date, timedelta
 
 import pandas as pd
-import requests
+from sqlalchemy import text
 
-from config import LOG_FILE, REQUEST_TIMEOUT, get_engine
+from config import MAX_CATCHUP_DAYS, get_engine, get_logger
+from http_utils import get_json
 
 # ---------------------------------------------------------
 # Config
@@ -26,26 +27,7 @@ TARGET_CURRENCIES = "USD,GBP,JPY,CHF,CNY"
 BASE_CURRENCY = "EUR"
 MARKET_TABLE = "market_currency_rates"
 
-# ---------------------------------------------------------
-# Logger
-# ---------------------------------------------------------
-def setup_logger():
-    logger = logging.getLogger("market_extract")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        )
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
-
-
-logger = setup_logger()
+logger = get_logger("market_extract")
 
 
 # ---------------------------------------------------------
@@ -55,9 +37,7 @@ def fetch_latest():
     """Fetch today's rates from Frankfurter."""
     url = f"{FRANKFURTER_BASE}/latest?base={BASE_CURRENCY}&symbols={TARGET_CURRENCIES}"
     logger.info(f"Fetching latest from {url}")
-    response = requests.get(url, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return _parse_response(response.json())
+    return _parse_response(get_json(url, logger))
 
 
 def fetch_range(start_date: date, end_date: date):
@@ -69,10 +49,7 @@ def fetch_range(start_date: date, end_date: date):
         f"?base={BASE_CURRENCY}&symbols={TARGET_CURRENCIES}"
     )
     logger.info(f"Fetching range from {url}")
-    response = requests.get(url, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    data = response.json()
+    data = get_json(url, logger)
     rows = []
     for rate_date_str, currency_rates in data.get("rates", {}).items():
         for quote, rate in currency_rates.items():
@@ -116,7 +93,6 @@ def load_to_market(rows):
     engine = get_engine()
     rate_dates = df["rate_date"].unique().tolist()
 
-    from sqlalchemy import text
     with engine.begin() as conn:
         # Delete existing rows for these dates
         placeholders = ",".join([f":d{i}" for i in range(len(rate_dates))])
@@ -137,10 +113,34 @@ def load_to_market(rows):
 # ---------------------------------------------------------
 # Main entry points
 # ---------------------------------------------------------
+def get_last_loaded_date():
+    """Return the most recent rate_date in market_currency_rates, or None."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        return conn.execute(
+            text(f"SELECT MAX(rate_date) FROM dbo.{MARKET_TABLE}")
+        ).scalar()
+
+
 def main():
-    """Daily extract — fetches latest rates only."""
+    """
+    Daily extract — fetches everything since the last loaded date, so a
+    skipped run doesn't leave a gap. Falls back to latest on an empty table.
+    """
     try:
-        rows = fetch_latest()
+        last_loaded = get_last_loaded_date()
+        today = date.today()
+        if last_loaded is None:
+            rows = fetch_latest()
+        elif last_loaded >= today:
+            logger.info(f"Market rates already loaded up to {last_loaded}")
+            rows = []
+        else:
+            start = max(
+                last_loaded + timedelta(days=1),
+                today - timedelta(days=MAX_CATCHUP_DAYS),
+            )
+            rows = fetch_range(start, today)
         count = load_to_market(rows)
         logger.info(f"[OK] Market extract completed. {count} rows loaded.")
         return count

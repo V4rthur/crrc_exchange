@@ -1,0 +1,3 @@
+IF DB_ID('CurrencyETL') IS NULL
+    CREATE DATABASE CurrencyETL;
+GO

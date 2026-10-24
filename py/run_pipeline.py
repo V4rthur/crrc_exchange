@@ -1,43 +1,24 @@
 import notifier
 from config import TELEGRAM_NOTIFY_SUCCESS
+import html
 import socket
 
 import sys
 if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-import logging
 import os
 import time
 import traceback
 from datetime import datetime
 
-from config import LOG_FILE
+from config import get_logger
 import extract_to_raw
 import transform_to_clean
 import audit
 
 
-# ---------------------------------------------------------
-# Logger
-# ---------------------------------------------------------
-def setup_logger():
-    logger = logging.getLogger("pipeline")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        )
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
-
-
-logger = setup_logger()
+logger = get_logger("pipeline")
 
 
 # ---------------------------------------------------------
@@ -63,16 +44,22 @@ def run():
     logger.info(f"PIPELINE START | {started_at} | trigger={triggered_by}")
     logger.info("=" * 60)
 
-    # Register run in audit table
-    run_id = audit.start_run("currency_etl", triggered_by=triggered_by)
-    logger.info(f"Audit run_id = {run_id}")
-
+    run_id = None
     extract_count = None
     transform_count = None
     error_stage = None
     error_message = None
 
     try:
+        # Register run in audit table (inside try, so a DB outage still alerts)
+        try:
+            run_id = audit.start_run("currency_etl", triggered_by=triggered_by)
+            logger.info(f"Audit run_id = {run_id}")
+        except Exception as e:
+            error_stage = "audit"
+            error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            raise
+
         # Stage 1: Extract
         logger.info(">>> STAGE 1: EXTRACT")
         try:
@@ -153,7 +140,7 @@ def run():
             if big_anomalies:
                 msg = "⚠️ <b>Currency Anomalies Today</b>\n\n"
                 for row in big_anomalies:
-                    msg += f"• <b>{row.currency_code}</b>: {row.anomaly_reason}\n"
+                    msg += f"• <b>{row.currency_code}</b>: {html.escape(row.anomaly_reason or '')}\n"
                 notifier.send(msg)
         except Exception as e:
             logger.warning(f"Anomaly notification failed: {e}")
@@ -166,14 +153,19 @@ def run():
         logger.error(f"PIPELINE FAILED | stage={error_stage} | error={e}")
         logger.error("=" * 60)
 
-        audit.finish_run(
-            run_id=run_id,
-            status="FAILED",
-            rows_extracted=extract_count,
-            rows_transformed=transform_count,
-            error_stage=error_stage,
-            error_message=error_message,
-        )
+        # The audit write can fail too (e.g. SQL Server down) — still send the alert
+        if run_id is not None:
+            try:
+                audit.finish_run(
+                    run_id=run_id,
+                    status="FAILED",
+                    rows_extracted=extract_count,
+                    rows_transformed=transform_count,
+                    error_stage=error_stage,
+                    error_message=error_message,
+                )
+            except Exception as audit_error:
+                logger.warning(f"Could not write failure to audit log: {audit_error}")
 
         notifier.notify_failure(
             run_id=run_id,

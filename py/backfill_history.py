@@ -2,123 +2,59 @@ import sys
 if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-import json
-import logging
 import time
 from datetime import date, timedelta
 
-import pandas as pd
-import requests
-
-from config import (
-    LOG_FILE,
-    RAW_TABLE,
-    REQUEST_TIMEOUT,
-    SOURCE_SYSTEM,
-    get_engine,
+from config import get_logger
+from extract_to_raw import (
+    REQUEST_DELAY,
+    fetch_cbu_date,
+    get_loaded_dates,
+    load_to_raw,
 )
 
-DAYS_BACK = 90                       
-CBU_HISTORICAL_URL = "https://cbu.uz/uz/arkhiv-kursov-valyut/json/all/{date}/"
-REQUEST_DELAY = 0.3                  
+DAYS_BACK = 90
 
-# ---------------------------------------------------------
-# Logger
-# ---------------------------------------------------------
-def setup_logger():
-    logger = logging.getLogger("backfill")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        )
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
+logger = get_logger("backfill")
 
 
-logger = setup_logger()
-
-
-def fetch_date(target_date):
-    """Fetch CBU rates for a specific date."""
-    url = CBU_HISTORICAL_URL.format(date=target_date.strftime("%Y-%m-%d"))
-    try:
-        response = requests.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, list) or len(data) == 0:
-            return []
-        return data
-    except Exception as e:
-        logger.warning(f"Failed to fetch {target_date}: {e}")
-        return []
-
-
-def build_rows(data):
-    from datetime import datetime
-    rows = []
-    for record in data:
-        rows.append({
-            "ccy": record.get("Ccy"),
-            "ccy_nm_uz": record.get("CcyNm_UZ"),
-            "ccy_nm_ru": record.get("CcyNm_RU"),
-            "ccy_nm_en": record.get("CcyNm_EN"),
-            "nominal": int(record["Nominal"]) if record.get("Nominal") else None,
-            "rate": float(record["Rate"]) if record.get("Rate") else None,
-            "diff": float(record["Diff"]) if record.get("Diff") else None,
-            "date": datetime.strptime(record["Date"], "%d.%m.%Y").date()
-                    if record.get("Date") else None,
-            "source_system": SOURCE_SYSTEM,
-            "raw_json": json.dumps(record, ensure_ascii=False),
-        })
-    return rows
-
-
-def main():
+def main(days_back=DAYS_BACK):
     logger.info("=" * 60)
-    logger.info(f"BACKFILL START | Fetching last {DAYS_BACK} days")
+    logger.info(f"BACKFILL START | Fetching last {days_back} days")
     logger.info("=" * 60)
 
     end_date = date.today()
-    start_date = end_date - timedelta(days=DAYS_BACK)
+    start_date = end_date - timedelta(days=days_back)
 
-    all_rows = []
+    all_data = []
     empty_dates = 0
     fetched_dates = 0
 
     current = start_date
     while current <= end_date:
-        data = fetch_date(current)
+        try:
+            data = fetch_cbu_date(current)
+        except Exception as e:
+            logger.warning(f"Failed to fetch {current}: {e}")
+            data = []
         if data:
-            rows = build_rows(data)
-            all_rows.extend(rows)
+            all_data.extend(data)
             fetched_dates += 1
-            logger.info(f"  {current}: {len(rows)} records")
+            logger.info(f"  {current}: {len(data)} records")
         else:
             empty_dates += 1
         current += timedelta(days=1)
         time.sleep(REQUEST_DELAY)
 
     logger.info(f"Total dates fetched: {fetched_dates}")
-    logger.info(f"Empty responses (likely weekends/holidays): {empty_dates}")
-    logger.info(f"Total records collected: {len(all_rows)}")
+    logger.info(f"Empty or failed responses: {empty_dates}")
+    logger.info(f"Total records collected: {len(all_data)}")
 
-    if not all_rows:
-        logger.warning("No data collected. Nothing to insert.")
-        return
-
-    # Bulk insert
-    df = pd.DataFrame(all_rows)
-    engine = get_engine()
-    df.to_sql(RAW_TABLE, engine, if_exists="append", index=False, chunksize=500)
-    logger.info(f"✅ Inserted {len(df)} rows into {RAW_TABLE}")
+    # Only rate dates that aren't in raw yet are inserted, so re-running is safe
+    count = load_to_raw(all_data, get_loaded_dates())
+    logger.info(f"✅ Backfill completed. {count} new rows loaded.")
     logger.info("Now run: python transform_to_clean.py")
 
 
 if __name__ == "__main__":
-    main()
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else DAYS_BACK)

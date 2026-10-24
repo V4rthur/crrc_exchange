@@ -2,34 +2,17 @@ import sys
 if sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-import logging
 import pandas as pd
 from sqlalchemy import text
 
 from config import (
-    LOG_FILE,
     RAW_TABLE,
     CLEAN_TABLE,
     get_engine,
+    get_logger,
 )
 
-def setup_logger():
-    logger = logging.getLogger("transform")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        fmt = logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
-        )
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-        fh.setFormatter(fmt)
-        ch = logging.StreamHandler()
-        ch.setFormatter(fmt)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
-    return logger
-
-
-logger = setup_logger()
+logger = get_logger("transform")
 
 
 def read_raw():

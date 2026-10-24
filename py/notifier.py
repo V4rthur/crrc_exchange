@@ -1,3 +1,4 @@
+import html
 import logging
 import requests
 
@@ -41,10 +42,15 @@ def notify_failure(run_id: int, stage: str, error: str, host: str):
     # Truncate error to fit Telegram's 4096 char limit
     error_snippet = (error[:1500] + "…") if len(error) > 1500 else error
 
+    # Error text often contains < > & — escape it or Telegram rejects the message
+    error_snippet = html.escape(error_snippet)
+    stage = html.escape(stage or "unknown")
+    host = html.escape(host)
+
     message = (
         f"🚨 <b>Currency ETL FAILED</b>\n\n"
         f"<b>Run ID:</b> {run_id}\n"
-        f"<b>Stage:</b> {stage or 'unknown'}\n"
+        f"<b>Stage:</b> {stage}\n"
         f"<b>Host:</b> {host}\n\n"
         f"<b>Error:</b>\n<pre>{error_snippet}</pre>"
     )

@@ -1,4 +1,6 @@
+import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
@@ -14,13 +16,25 @@ LOG_DIR.mkdir(exist_ok=True)
 load_dotenv(BASE_DIR / ".env")
 
 CBU_URL = "https://cbu.uz/uz/arkhiv-kursov-valyut/json/"
+CBU_HISTORICAL_URL = "https://cbu.uz/uz/arkhiv-kursov-valyut/json/all/{date}/"
 SOURCE_SYSTEM = "CBU_JSON"
 REQUEST_TIMEOUT = 30  # seconds
 
+# Retry policy for API calls (network errors, 429 and 5xx responses)
+HTTP_RETRIES = 3
+HTTP_BACKOFF = 2  # seconds; doubles after each failed attempt
 
-SQL_SERVER = "localhost"
-SQL_DATABASE = "CurrencyETL"
-SQL_DRIVER = "ODBC Driver 17 for SQL Server"
+# If the pipeline missed some days, the next run fetches them too (up to this many)
+MAX_CATCHUP_DAYS = 90
+
+# Rotating log file: 1 MB per file, 5 old files kept
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 5
+
+
+SQL_SERVER = os.getenv("SQL_SERVER", "localhost")
+SQL_DATABASE = os.getenv("SQL_DATABASE", "CurrencyETL")
+SQL_DRIVER = os.getenv("SQL_DRIVER", "ODBC Driver 17 for SQL Server")
 
 connection_url = URL.create(
     "mssql+pyodbc",
@@ -42,6 +56,29 @@ def get_engine():
 
 RAW_TABLE = "raw_currency_rates"
 CLEAN_TABLE = "clean_currency_rates"
+
+
+def get_logger(name):
+    """Return a logger that writes to the console and the rotating log file."""
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+        )
+        fh = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        fh.setFormatter(fmt)
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+    return logger
+
 
 # ---------------------------------------------------------
 # Telegram alerts

@@ -5,7 +5,7 @@
 ![Python](https://img.shields.io/badge/Python-3.13-blue.svg)
 ![SQL Server](https://img.shields.io/badge/SQL_Server-2019+-red.svg)
 ![Power BI](https://img.shields.io/badge/Power_BI-Desktop-yellow.svg)
-![Status](https://img.shields.io/badge/Status-Production-brightgreen.svg)
+![Status](https://img.shields.io/badge/Status-Portfolio_project-blue.svg)
 
 ---
 
@@ -19,7 +19,7 @@
 - [Setup](#setup)
 - [How It Works](#how-it-works)
 - [Sample Insights](#sample-insights)
-- [Screenshots](#screenshots)
+- [Dashboard](#dashboard)
 - [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
 - [Lessons Learned](#lessons-learned)
@@ -105,7 +105,9 @@ flowchart TB
 ### 🔄 Robust ETL Pipeline
 - **Idempotent daily loads** — safely re-runnable via DELETE + INSERT strategy
 - **Append-only raw layer** — full audit trail, reprocessing safety net
-- **Historical backfill support** — one-time script fetches 90 days of history
+- **Historical backfill support** — script fetches 90 days of history and skips dates already loaded
+- **Retries with backoff** — API calls retry 3 times on network errors, 429 and 5xx responses
+- **Automatic catch-up** — if a daily run is missed, the next run fetches the missing days from both sources
 - **Fail-fast orchestration** — early stages fail loud, auxiliary stages fail soft
 
 ### 📊 Advanced Analytics Layer
@@ -145,38 +147,39 @@ flowchart TB
 
 ## Project Structure
 
+```
 Currency Exchange/
-└── py/
-├── config.py # Central configuration & DB connection
-├── audit.py # Pipeline run logging helper
-├── notifier.py # Telegram notification helper
-│
-├── extract_to_raw.py # CBU JSON → raw_currency_rates
-├── transform_to_clean.py # Cleanup + anomaly detection
-├── extract_market_rates.py # Frankfurter → market_currency_rates
-├── compute_divergence.py # Cross-rate divergence analytics
-│
-├── backfill_history.py # One-time CBU historical loader (90 days)
-├── run_pipeline.py # Main orchestrator (entry point)
-│
-├── requirements.txt
-├── .env # Secrets (not in git)
-├── .gitignore
-├── README.md
+├── py/
+│   ├── config.py                # Central configuration, DB connection, logging
+│   ├── http_utils.py            # API calls with retries
+│   ├── audit.py                 # Pipeline run logging helper
+│   ├── notifier.py              # Telegram notification helper
+│   │
+│   ├── extract_to_raw.py        # CBU JSON → raw_currency_rates
+│   ├── transform_to_clean.py    # Cleanup + anomaly detection
+│   ├── extract_market_rates.py  # Frankfurter → market_currency_rates
+│   ├── compute_divergence.py    # Cross-rate divergence analytics
+│   │
+│   ├── backfill_history.py      # CBU historical loader (90 days)
+│   ├── run_pipeline.py          # Main orchestrator (entry point)
+│   │
+│   ├── requirements.txt
+│   ├── .env.example             # Template for .env (secrets, not in git)
+│   ├── README.md
+│   └── logs/
+│       └── etl_log.txt          # Rotating execution log (not in git)
 │
 ├── sql/
-│ ├── create_raw_table.sql
-│ ├── create_clean_table.sql
-│ ├── create_audit_table.sql
-│ ├── create_market_and_divergence_tables.sql
-│ └── add_anomaly_columns.sql
+│   ├── create_database.sql
+│   ├── create_raw_table.sql
+│   ├── create_clean_table.sql
+│   ├── create_audit_table.sql
+│   ├── create_market_and_divergence_tables.sql
+│   └── add_anomaly_columns.sql
 │
-├── logs/
-│ └── etl_log.txt # Rolling execution log
-│
-└── powerbi/
-└── Currency_Exchange_Dashboard.pbix
-
+├── CurrencyETL.pbix             # Power BI dashboard
+└── currency_theme.json          # Power BI theme
+```
 
 ---
 
@@ -194,8 +197,8 @@ Currency Exchange/
 
 **1. Clone repository:**
 ```powershell
-git clone <your-repo-url>
-cd "Currency Exchange/py"
+git clone https://github.com/V4rthur/crrc_exchange.git
+cd crrc_exchange/py
 ```
 
 **2. Install Python dependencies:**
@@ -204,20 +207,23 @@ pip install -r requirements.txt
 ```
 
 **3. Create SQL Server database and tables:**
-Run the SQL scripts in order via SSMS:
+Run the SQL scripts from the `sql/` folder in order via SSMS:
 
-sql/create_raw_table.sql
-sql/create_clean_table.sql
-sql/create_audit_table.sql
-sql/create_market_and_divergence_tables.sql
-sql/add_anomaly_columns.sql
+```
+create_database.sql
+create_raw_table.sql
+create_clean_table.sql
+create_audit_table.sql
+create_market_and_divergence_tables.sql
+add_anomaly_columns.sql
+```
 
-
-**4. Create `.env` file** in `py/` folder:
+**4. Create `.env` file** in `py/` folder (copy `.env.example`):
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 ```
+The SQL Server connection defaults to `localhost` / `CurrencyETL` / ODBC Driver 17. Override it with `SQL_SERVER`, `SQL_DATABASE` and `SQL_DRIVER` in `.env` if yours differs.
 
 **5. Verify DB connection:**
 ```powershell
@@ -247,8 +253,10 @@ Open Task Scheduler → Create Basic Task → Daily 09:00 → run `python run_pi
 
 ### Stage 1 — Extract (CBU)
 - Fetches JSON from `https://cbu.uz/uz/arkhiv-kursov-valyut/json/`
-- Parses ~74 currency records for today
-- Appends to `raw_currency_rates` (never overwrites)
+- Retries up to 3 times with exponential backoff on network errors
+- Also fetches any days missed since the last loaded rate date (up to 90)
+- Parses ~74 currency records per rate date
+- Appends only new rate dates to `raw_currency_rates` (never overwrites)
 - Preserves original JSON in `raw_json` column for audit
 
 ### Stage 2 — Transform
@@ -265,7 +273,7 @@ Open Task Scheduler → Create Basic Task → Daily 09:00 → run `python run_pi
 - Loads to `clean_currency_rates` via DELETE + INSERT (idempotent)
 
 ### Stage 3 — Market Extract
-- Fetches EUR-based rates for USD, GBP, JPY, CHF, CNY from Frankfurter
+- Fetches EUR-based rates for USD, GBP, JPY, CHF, CNY from Frankfurter, from the last loaded date up to today
 - Loads into `market_currency_rates`
 - **Non-fatal** — if Frankfurter is down, core pipeline still succeeds
 
@@ -299,24 +307,18 @@ Open Task Scheduler → Create Basic Task → Daily 09:00 → run `python run_pi
 
 ### Analytical Finding #2 — Volatile currencies detected
 
-Anomaly detector flagged 206 events across 4,662 rows (4.42% flag rate — well-calibrated). Top offenders:
+Anomaly detector flagged 206 events across 4,662 rows (4.42% flag rate). Top offenders:
 - **Lebanese Pound (LBP)** — consistent with country's ongoing currency crisis
 - **Syrian Pound (SYP)** — expected given sanctions and economic instability
 - **Kazakh Tenge (KZT)** — regional volatility from oil price swings
 
-USD, EUR, and other managed majors correctly showed **zero anomalies**, confirming detector calibration.
+USD, EUR, and other managed majors showed **zero anomalies**, which matches expectations for stable currencies. Note that a |z| > 2 threshold flags roughly 5% of rows by construction, so the flag rate alone doesn't validate the detector.
 
 ---
 
-## Screenshots
+## Dashboard
 
-*(Add screenshots here after Power BI dashboard is finalized)*
-
-- `screenshots/dashboard-main.png` — main KPI dashboard
-- `screenshots/dashboard-trends.png` — historical trend page
-- `screenshots/dashboard-divergence.png` — CBU vs ECB divergence page
-- `screenshots/task-scheduler.png` — Task Scheduler success confirmation
-- `screenshots/telegram-alert.png` — sample failure alert
+The Power BI report is `CurrencyETL.pbix` in the repository root (open with Power BI Desktop). It covers KPIs, historical trends, anomalies, and CBU vs ECB divergence.
 
 ---
 
@@ -326,6 +328,7 @@ USD, EUR, and other managed majors correctly showed **zero anomalies**, confirmi
 - ECB doesn't publish weekends either — divergence gaps exist on Sat/Sun
 - RUB not covered in market comparison (suspended from ECB reference basket in 2022)
 - Windows-specific automation (Task Scheduler) — Linux would need cron equivalent
+- No automated tests yet
 - Anomaly detection thresholds are fixed; adaptive thresholds could improve early-history detection
 
 ---
